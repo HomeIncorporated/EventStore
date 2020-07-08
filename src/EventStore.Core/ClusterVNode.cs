@@ -41,9 +41,11 @@ using System.Threading.Tasks;
 using EventStore.Common.Exceptions;
 using EventStore.Core.Authorization;
 using EventStore.Core.Cluster;
+using EventStore.Native.UnixSignalManager;
 using EventStore.Plugins.Authentication;
 using EventStore.Plugins.Authorization;
 using Microsoft.AspNetCore.Hosting;
+using Mono.Unix.Native;
 using ILogger = Serilog.ILogger;
 using MidFunc = System.Func<
 	Microsoft.AspNetCore.Http.HttpContext,
@@ -140,6 +142,7 @@ namespace EventStore.Core {
 		public Func<X509Certificate, X509Chain, SslPolicyErrors, ValueTuple<bool, string>> InternalClientCertificateValidator => _internalClientCertificateValidator;
 		public Func<X509Certificate2> CertificateSelector => _certificateSelector;
 		public bool DisableHttps => _disableHttps;
+		private UnixSignalManager _unixSignalManager;
 
 #if DEBUG
 		public TaskCompletionSource<bool> _taskAddedTrigger = new TaskCompletionSource<bool>();
@@ -738,6 +741,13 @@ namespace EventStore.Core {
 			AddTask(subscrQueue.Start());
 			AddTask(perSubscrQueue.Start());
 
+			if (Runtime.IsUnixOrMac) {
+				_unixSignalManager = new UnixSignalManager(new[] {Signum.SIGHUP});
+				_unixSignalManager.Subscribe(Signum.SIGHUP, () => {
+					_mainQueue.Publish(new ClientMessage.ReloadConfig());
+				});
+			}
+
 			if (subsystems != null) {
 				foreach (var subsystem in subsystems) {
 					var http = new[] { _httpService };
@@ -771,6 +781,8 @@ namespace EventStore.Core {
 			timeout ??= TimeSpan.FromSeconds(5);
 			_mainQueue.Publish(new ClientMessage.RequestShutdown(false, true));
 
+			_unixSignalManager?.Stop();
+
 			if (_subsystems != null) {
 				foreach (var subsystem in _subsystems) {
 					subsystem.Stop();
@@ -790,6 +802,8 @@ namespace EventStore.Core {
 		}
 
 		public void Handle(SystemMessage.BecomeShuttingDown message) {
+			_unixSignalManager?.Stop();
+
 			if (_subsystems == null)
 				return;
 			foreach (var subsystem in _subsystems)
